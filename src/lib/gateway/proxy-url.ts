@@ -1,6 +1,9 @@
+import { isMockGatewayEnabled, MOCK_GATEWAY_URL } from "@/lib/gateway/mock/createGatewaySocket";
+
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 export const resolveStudioProxyGatewayUrl = (upstreamGatewayUrl?: string): string => {
+  if (isMockGatewayEnabled()) return MOCK_GATEWAY_URL;
   const raw = typeof upstreamGatewayUrl === "string" ? upstreamGatewayUrl.trim() : "";
   if (raw) {
     try {

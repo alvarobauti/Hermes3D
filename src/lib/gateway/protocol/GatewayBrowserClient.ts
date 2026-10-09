@@ -3,6 +3,7 @@
 // bumped the negotiated protocol version from 3 to 4.
 import { getPublicKeyAsync, signAsync, utils } from "@noble/ed25519";
 import { GatewayResponseError } from "@/lib/gateway/errors";
+import { createGatewaySocket } from "@/lib/gateway/mock/createGatewaySocket";
 
 const gatewayBrowserDebugEnabled =
   process.env.NODE_ENV !== "production";
@@ -454,7 +455,7 @@ export class GatewayBrowserClient {
   private connect() {
     if (this.closed) return;
     gatewayBrowserDebugLog("connect:open-socket", { url: this.opts.url });
-    this.ws = new WebSocket(this.opts.url);
+    this.ws = createGatewaySocket(this.opts.url);
     this.ws.onopen = () => {
       gatewayBrowserDebugLog("socket:open");
       this.queueConnect();
