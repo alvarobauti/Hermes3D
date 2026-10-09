@@ -1,4 +1,5 @@
-import { DEFAULT_AGENT_ID, DEMO_AGENTS, type DemoAgent } from "./demoAgents";
+import { DEMO_AGENTS, type DemoAgent } from "./demoAgents";
+import { isEmbedded, waitForEmbedAgents } from "./embedAgents";
 
 /**
  * In-browser stand-in for the demo gateway (server/demo-gateway-adapter.js).
@@ -32,13 +33,17 @@ const err = (id: string, code: string, message: string): Frame => ({
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 class MockGatewayBackend {
-  private agents = new Map<string, DemoAgent>(DEMO_AGENTS.map((a) => [a.id, a]));
+  private readonly agents: Map<string, DemoAgent>;
+  private readonly defaultId: string;
   private files = new Map<string, string>();
   private sessionSettings = new Map<string, { model?: string; thinkingLevel?: string }>();
   private history = new Map<string, Message[]>();
   private runs = new Map<string, { sessionKey: string; abort: () => void }>();
 
-  constructor(private readonly emit: EmitFn) {}
+  constructor(private readonly emit: EmitFn, agents: readonly DemoAgent[]) {
+    this.agents = new Map(agents.map((a) => [a.id, a]));
+    this.defaultId = agents[0]?.id ?? "";
+  }
 
   helloPayload(): Frame {
     return {
@@ -49,9 +54,9 @@ class MockGatewayBackend {
       snapshot: {
         health: {
           agents: [...this.agents.values()].map((a) => ({
-            agentId: a.id, name: a.name, isDefault: a.id === DEFAULT_AGENT_ID,
+            agentId: a.id, name: a.name, isDefault: a.id === this.defaultId,
           })),
-          defaultAgentId: DEFAULT_AGENT_ID,
+          defaultAgentId: this.defaultId,
         },
         sessionDefaults: { mainKey: MAIN_KEY },
       },
@@ -86,7 +91,7 @@ class MockGatewayBackend {
     switch (method) {
       case "agents.list":
         return ok(id, {
-          defaultId: DEFAULT_AGENT_ID,
+          defaultId: this.defaultId,
           mainKey: MAIN_KEY,
           agents: [...this.agents.values()].map((a) => ({
             id: a.id, name: a.name, workspace: a.workspace, role: a.role,
@@ -97,7 +102,7 @@ class MockGatewayBackend {
         const name = str(p.name).trim() || "Nuevo agente";
         const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agente";
         const agentId = `${slug}-${randomId().slice(0, 6)}`;
-        const base = DEMO_AGENTS[1];
+        const base = [...this.agents.values()].at(-1) ?? DEMO_AGENTS[0];
         this.agents.set(agentId, { ...base, id: agentId, name, role: str(p.role).trim(), workspace: `/demo/${slug}` });
         this.emit({ type: "event", event: "presence", payload: { sessions: { recent: [], byAgent: [] } } });
         return ok(id, { agentId, name, workspace: `/demo/${slug}` });
@@ -114,17 +119,17 @@ class MockGatewayBackend {
       }
       case "agents.delete": {
         const agentId = str(p.agentId).trim();
-        if (agentId && agentId !== DEFAULT_AGENT_ID && this.agents.delete(agentId)) {
+        if (agentId && agentId !== this.defaultId && this.agents.delete(agentId)) {
           this.history.delete(sessionKeyFor(agentId));
         }
         return ok(id, { ok: true, removedBindings: 0 });
       }
       case "agents.files.get": {
-        const content = this.files.get(`${str(p.agentId, DEFAULT_AGENT_ID)}/${str(p.name)}`);
+        const content = this.files.get(`${str(p.agentId, this.defaultId)}/${str(p.name)}`);
         return ok(id, { file: content !== undefined ? { content } : { missing: true } });
       }
       case "agents.files.set":
-        this.files.set(`${str(p.agentId, DEFAULT_AGENT_ID)}/${str(p.name)}`, str(p.content));
+        this.files.set(`${str(p.agentId, this.defaultId)}/${str(p.name)}`, str(p.content));
         return ok(id);
       case "config.get":
         return ok(id, {
@@ -181,7 +186,7 @@ class MockGatewayBackend {
         return ok(id, { ts: Date.now(), previews });
       }
       case "sessions.patch": {
-        const key = str(p.key, sessionKeyFor(DEFAULT_AGENT_ID));
+        const key = str(p.key, sessionKeyFor(this.defaultId));
         const next = { ...this.sessionSettings.get(key) };
         if (p.model !== undefined) next.model = p.model as string;
         if (p.thinkingLevel !== undefined) next.thinkingLevel = p.thinkingLevel as string;
@@ -192,14 +197,14 @@ class MockGatewayBackend {
         });
       }
       case "sessions.reset":
-        this.history.delete(str(p.key, sessionKeyFor(DEFAULT_AGENT_ID)));
+        this.history.delete(str(p.key, sessionKeyFor(this.defaultId)));
         return ok(id, { ok: true });
       case "chat.send":
         return this.chatSend(p, id);
       case "chat.abort":
         return ok(id, { ok: true, aborted: this.abortRuns(str(p.runId).trim(), str(p.sessionKey).trim()) });
       case "chat.history": {
-        const sessionKey = str(p.sessionKey, sessionKeyFor(DEFAULT_AGENT_ID));
+        const sessionKey = str(p.sessionKey, sessionKeyFor(this.defaultId));
         return ok(id, { sessionKey, messages: this.hist(sessionKey) });
       }
       case "agent.wait": {
@@ -237,9 +242,10 @@ class MockGatewayBackend {
   }
 
   private chatSend(p: Params, id: string): Frame {
-    const sessionKey = str(p.sessionKey, sessionKeyFor(DEFAULT_AGENT_ID));
-    const agentId = sessionKey.startsWith("agent:") ? sessionKey.split(":")[1] : DEFAULT_AGENT_ID;
-    const agent = this.agents.get(agentId) ?? DEMO_AGENTS[0];
+    const sessionKey = str(p.sessionKey, sessionKeyFor(this.defaultId));
+    const agentId = sessionKey.startsWith("agent:") ? sessionKey.split(":")[1] : this.defaultId;
+    const agent = this.agents.get(agentId) ?? this.agents.get(this.defaultId);
+    if (!agent) return err(id, "not_found", "No hay agentes disponibles.");
     const message = str(p.message).trim();
     const runId = str(p.idempotencyKey) || randomId();
     if (!message) return ok(id, { status: "no-op", runId });
@@ -299,16 +305,21 @@ export class MockGatewaySocket {
 
   private connected = false;
   private globalSeq = 0;
-  private readonly backend: MockGatewayBackend;
+  private backend: MockGatewayBackend | null = null;
 
   constructor(readonly url: string) {
-    this.backend = new MockGatewayBackend((frame) => this.deliver(frame));
-    setTimeout(() => {
-      if (this.readyState !== MockGatewaySocket.CONNECTING) return;
-      this.readyState = MockGatewaySocket.OPEN;
-      this.onopen?.({});
-      this.deliver({ type: "event", event: "connect.challenge", payload: { nonce: randomId() } });
-    }, 0);
+    void this.start();
+  }
+
+  /** Embedded in the dashboard, the agents come from the parent page; otherwise the demo list. */
+  private async start() {
+    await sleep(0); // let the caller attach onopen/onmessage first
+    const agents = isEmbedded() ? await waitForEmbedAgents() : DEMO_AGENTS;
+    if (this.readyState !== MockGatewaySocket.CONNECTING) return;
+    this.backend = new MockGatewayBackend((frame) => this.deliver(frame), agents);
+    this.readyState = MockGatewaySocket.OPEN;
+    this.onopen?.({});
+    this.deliver({ type: "event", event: "connect.challenge", payload: { nonce: randomId() } });
   }
 
   private deliver(frame: Frame) {
@@ -332,14 +343,16 @@ export class MockGatewaySocket {
   }
 
   private async dispatch(id: string, method: string, params: Params) {
+    const backend = this.backend;
+    if (!backend) return this.deliver(err(id, "not_connected", "Gateway not ready."));
     if (method === "connect") {
       this.connected = true;
-      this.deliver(ok(id, this.backend.helloPayload()));
+      this.deliver(ok(id, backend.helloPayload()));
       return;
     }
     if (!this.connected) return this.deliver(err(id, "not_connected", "Send connect first."));
     try {
-      this.deliver(await this.backend.handle(method, params, id));
+      this.deliver(await backend.handle(method, params, id));
     } catch (e) {
       this.deliver(err(id, "internal_error", e instanceof Error ? e.message : "Internal error"));
     }

@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 import path from "node:path";
 
+// When set, exactly this origin may embed the app in an iframe (the owner dashboard).
+const embedParentOrigin = process.env.NEXT_PUBLIC_EMBED_PARENT_ORIGIN?.trim() ?? "";
+
 const securityHeaders = [
   {
     key: "Content-Security-Policy",
@@ -8,7 +11,9 @@ const securityHeaders = [
       "default-src 'self'",
       "base-uri 'self'",
       "form-action 'self'",
-      "frame-ancestors 'self'",
+      embedParentOrigin
+        ? `frame-ancestors 'self' ${embedParentOrigin}`
+        : "frame-ancestors 'self'",
       "img-src 'self' data: blob: http: https:",
       "font-src 'self' data: https:",
       "style-src 'self' 'unsafe-inline' https:",
@@ -39,10 +44,8 @@ const securityHeaders = [
     key: "X-Content-Type-Options",
     value: "nosniff",
   },
-  {
-    key: "X-Frame-Options",
-    value: "SAMEORIGIN",
-  },
+  // X-Frame-Options cannot name a second origin; CSP frame-ancestors above covers embedding.
+  ...(embedParentOrigin ? [] : [{ key: "X-Frame-Options", value: "SAMEORIGIN" }]),
   {
     key: "Permissions-Policy",
     value: "camera=(), microphone=(self), geolocation=(), browsing-topics=()",
